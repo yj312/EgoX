@@ -11,6 +11,7 @@ DEFAULT_CAMERA_EXTRINSICS = [
     [0.0, 0.0, 1.0, 0.0]
 ]
 
+# Standard EGO intrinsics (512x512 scale) required by EgoX downscaling model
 DEFAULT_EGO_INTRINSICS = [
     [150.0, 0.0, 255.5],
     [0.0, 150.0, 255.5],
@@ -20,6 +21,7 @@ DEFAULT_EGO_INTRINSICS = [
 def create_meta_init(folder_path, output_json_path, overwrite=False):
     """
     Initialize meta.json by scanning for exo.mp4 files in the given folder.
+    Automatically calculates camera_intrinsics based on video resolution.
     Structure:
       folder_path/videos/take_name/exo.mp4
     """
@@ -28,8 +30,6 @@ def create_meta_init(folder_path, output_json_path, overwrite=False):
     videos_dir = base_dir / "videos"
     
     if not videos_dir.exists():
-        # Try to see if folder_path itself is the videos dir or contains videos directly
-        # But instructions say: your_dataset/videos/take_name/exo.mp4
         print(f"Error: Videos directory not found at {videos_dir}")
         print(f"Make sure your structure is: {folder_path}/videos/take_name/exo.mp4")
         return
@@ -44,12 +44,6 @@ def create_meta_init(folder_path, output_json_path, overwrite=False):
             exo_path = video_folder / "exo.mp4"
             
             if exo_path.exists():
-                # Make relative path. 
-                # If output_json_path is ./your_dataset/meta.json, 
-                # and exo_path is ./your_dataset/videos/take_name/exo.mp4
-                # ideally we want the path in json to be valid relative to where the script is run or absolute.
-                # The user's example in README shows: "./example/in_the_wild/videos/..."
-                
                 try:
                     rel_exo_path = os.path.relpath(exo_path, os.getcwd())
                     if not rel_exo_path.startswith(".") and not rel_exo_path.startswith("/"):
@@ -57,9 +51,34 @@ def create_meta_init(folder_path, output_json_path, overwrite=False):
                 except ValueError:
                     rel_exo_path = str(exo_path)
 
+                # Try to load video with cv2 to calculate intrinsics
+                w, h = 1920, 1080  # Default fallback
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(str(exo_path))
+                    w_cap = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h_cap = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    cap.release()
+                    if w_cap > 0 and h_cap > 0:
+                        w, h = w_cap, h_cap
+                        print(f"Detected video resolution for {video_folder.name}: {w} x {h}")
+                except Exception as e:
+                    print(f"Note: OpenCV not available in current env, using 1920x1080 fallback: {e}")
+
+                # Calculate camera_intrinsics dynamically
+                f = float(max(w, h))
+                cx = float(w) / 2.0
+                cy = float(h) / 2.0
+                camera_intrinsics = [
+                    [f, 0.0, cx],
+                    [0.0, f, cy],
+                    [0.0, 0.0, 1.0]
+                ]
+
                 dataset_entry = {
                     "exo_path": rel_exo_path,
                     "prompt": "", 
+                    "camera_intrinsics": camera_intrinsics,
                     "camera_extrinsics": DEFAULT_CAMERA_EXTRINSICS,
                     "ego_intrinsics": DEFAULT_EGO_INTRINSICS,
                 }
@@ -76,7 +95,7 @@ def create_meta_init(folder_path, output_json_path, overwrite=False):
                         dataset_entry["ego_prior_path"] = str(ego_path)
 
                 datasets.append(dataset_entry)
-                print(f"Found: {video_folder.name}")
+                print(f"Found and configured: {video_folder.name}")
     
     if not datasets:
         print("No video folders with exo.mp4 found.")

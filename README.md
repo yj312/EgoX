@@ -29,6 +29,32 @@ https://github.com/user-attachments/assets/5f599ad0-0922-414b-a8ab-e789da068efa
 - **Python**: 3.10
 - **PyTorch**: Version compatible with CUDA 12.1
 
+## 내 수정 버전의 실행 환경
+
+EgoX 모델과 EgoPrior Renderer는 별도의 Conda 환경을 사용합니다.
+
+### EgoX 환경 설치
+
+EgoX 저장소 루트에서 실행합니다.
+
+```bash
+conda create -n egox python=3.10 -y
+conda activate egox
+
+python -m pip install torch==2.7.0 torchvision==0.22.0 \
+  --index-url https://download.pytorch.org/whl/cu128
+
+python -m pip install -r requirements.txt
+```
+
+### EgoPrior Renderer 환경 설치
+
+Renderer의 설치 방법은
+[EgoPrior Renderer README](EgoX-EgoPriorRenderer/README.md)를 참고하세요.
+
+EgoX 모델을 실행할 때는 `egox` 환경을,
+Renderer를 실행할 때는 `egox-egoprior` 환경을 활성화합니다. (아래 Installation 말고 현재가 최근 버전임!)
+
 ### Installation
 
 Create a conda environment and install dependencies:

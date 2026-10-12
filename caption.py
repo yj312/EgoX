@@ -14,10 +14,18 @@ from pathlib import Path
 from openai import OpenAI
 import numpy as np
 
-# Initialize OpenAI client with Letsur API
+# Initialize OpenAI client using environment variables
+api_key = os.environ.get("OPENAI_API_KEY")
+base_url = os.environ.get("OPENAI_BASE_URL") # Falls back to standard OpenAI URL if None
+
+if not api_key:
+    # Check for placeholder strings in file
+    print("Warning: OPENAI_API_KEY environment variable is not set.")
+    print("Please run: export OPENAI_API_KEY='your-key'")
+
 client = OpenAI(
-    base_url="YOUR_BASE_URL",
-    api_key="YOUR_API_KEY"
+    api_key=api_key if api_key else "YOUR_API_KEY",
+    base_url=base_url if base_url else None
 )
 
 # System prompt adapted from captioning.py
@@ -173,13 +181,14 @@ def get_frame_files(folder_path, num_frames=4):
     return selected_frames
 
 
-def extract_frames_from_video(video_path, num_frames=4):
+def extract_frames_from_video(video_path, num_frames=4, limit_frames=None):
     """
     Extract evenly distributed frames from a video file.
     
     Args:
         video_path: Path to the video file
         num_frames: Number of frames to extract
+        limit_frames: Limit video frame range to first N frames (e.g. 49)
         
     Returns:
         List of cv2 images (numpy arrays)
@@ -199,6 +208,10 @@ def extract_frames_from_video(video_path, num_frames=4):
             print(f"Warning: Video {video_path} has 0 frames")
             cap.release()
             return []
+            
+        # Limit total frames to first N frames if specified
+        if limit_frames is not None and limit_frames > 0:
+            total_frames = min(total_frames, limit_frames)
             
         # Calculate indices for evenly distributed frames
         if total_frames <= num_frames:
@@ -385,7 +398,7 @@ def extract_captions_for_task(task_path, num_frames=4):
         return None
 
 
-def extract_caption_from_video(exo_path, ego_path=None, num_frames=4):
+def extract_caption_from_video(exo_path, ego_path=None, num_frames=4, limit_frames=None):
     """
     Generate caption from video files directly.
     
@@ -393,6 +406,7 @@ def extract_caption_from_video(exo_path, ego_path=None, num_frames=4):
         exo_path: Path to the exocentric video file
         ego_path: Path to the egocentric video file (optional)
         num_frames: Number of frames to process
+        limit_frames: Limit video frame range to first N frames
         
     Returns:
         Generated caption string or None
@@ -400,14 +414,14 @@ def extract_caption_from_video(exo_path, ego_path=None, num_frames=4):
     print(f"Processing video: {exo_path}")
     
     # Extract frames
-    exo_images = extract_frames_from_video(exo_path, num_frames)
+    exo_images = extract_frames_from_video(exo_path, num_frames, limit_frames=limit_frames)
     if not exo_images:
         print(f"Warning: No frames extracted from {exo_path}")
         return None
         
     ego_images = []
     if ego_path and os.path.exists(ego_path):
-        ego_images = extract_frames_from_video(ego_path, num_frames)
+        ego_images = extract_frames_from_video(ego_path, num_frames, limit_frames=limit_frames)
     
     # Prepare content for GPT-4o
     content = [
@@ -523,7 +537,7 @@ def filter_tasks_without_captions(datasets, overwrite=False):
     return tasks_without_captions
 
 
-def process_all_tasks(json_file_path, output_json_path, max_tasks=None, start_from=None, stop_count=-1, overwrite=False):
+def process_all_tasks(json_file_path, output_json_path, max_tasks=None, start_from=None, stop_count=-1, overwrite=False, num_frames=4, limit_frames=None):
     """
     Process tasks from JSON and update the JSON with new prompts.
     """
@@ -574,16 +588,21 @@ def process_all_tasks(json_file_path, output_json_path, max_tasks=None, start_fr
                 print(f"Skipping task {i}: Prompt already exists")
                 continue
                 
-            # Resolve relative paths
-            # Assuming paths in json are relative to the json file location or CWD?
-            # User said "example/in_the_wild/videos/..." in the request, and json has "./example/..."
-            # Adjust path if needed.
-            if exo_path.startswith("./"):
-                # exo_path = exo_path[2:] # Remove ./
-                pass
+            # Resolve relative paths relative to json file location
+            json_dir = os.path.dirname(os.path.abspath(json_file_path))
+            
+            if exo_path and not os.path.isabs(exo_path) and not os.path.exists(exo_path):
+                alt_path = os.path.join(json_dir, exo_path)
+                if os.path.exists(alt_path):
+                    exo_path = alt_path
+            
+            if ego_path and not os.path.isabs(ego_path) and not os.path.exists(ego_path):
+                alt_path = os.path.join(json_dir, ego_path)
+                if os.path.exists(alt_path):
+                    ego_path = alt_path
             
             # Processing
-            caption = extract_caption_from_video(exo_path, ego_path=ego_path)
+            caption = extract_caption_from_video(exo_path, ego_path=ego_path, num_frames=num_frames, limit_frames=limit_frames)
             
             if caption:
                 dataset["prompt"] = caption
@@ -633,6 +652,8 @@ def main():
                        help="Number of successful tasks after which to pause (-1 for no pause, default: -1)")
     parser.add_argument("--overwrite", action="store_true",
                        help="Reprocess tasks that already have captions (overwrite existing caption.json)")
+    parser.add_argument("--limit_frames", type=int, default=None,
+                       help="Limit video frame range to first N frames (e.g. 49)")
     
     args = parser.parse_args()
     
@@ -646,7 +667,9 @@ def main():
         max_tasks=args.max_tasks,
         start_from=args.start_from,
         stop_count=args.stop_count,
-        overwrite=args.overwrite
+        overwrite=args.overwrite,
+        num_frames=args.num_frames,
+        limit_frames=args.limit_frames
     )
 
 

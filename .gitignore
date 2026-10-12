@@ -33,11 +33,28 @@ output*/
 log*
 
 training/
-
 tmp/
-
 dataset/
 
 Wan2.1-I2V-14B-480P-Diffusers/
 
 checkpoints/
+api_key.txt
+openai_api_key.txt
+
+# 비밀 설정
+.env
+.env.*
+!.env.example
+
+# datasets 내부 전체 포함
+!/datasets/
+!/datasets/**
+
+# 단, 폴더 이름에 egobody가 포함된 폴더와 그 내용 제외
+/datasets/**/*[eE][gG][oO][bB][oO][dD][yY]*/
+
+# 실행 결과와 백업 파일
+/q_outputs/
+/results_test_mp/
+*.bak

@@ -122,6 +122,7 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
         last_images: Optional[torch.Tensor] = None,
+        mask_first_frame_ego: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Calculate latent dimensions for each view type
         num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
@@ -179,6 +180,12 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         # Set ego_view mask (right part) to 0.0  
         mask_lat_size[:, :, :, :, exo_latent_width:] = 0.0
 
+        if mask_first_frame_ego:
+            # Set first frame (frame 0) of ego_view to 1.0 to force consistency with the conditioning image
+            mask_lat_size[:, :, 0, :, exo_latent_width:] = 1.0
+            # Initialize the first frame of the ego region in latents to the conditioning latent
+            latents[:, :, 0, :, exo_latent_width:] = ego_prior_latents[:, :, 0, :, :].to(dtype=dtype)
+
         if last_images is None:
             mask_lat_size[:, :, list(range(1, num_frames))] = 0
         else:
@@ -217,7 +224,8 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         return latent
     
     def _setup_ic_lora_latent(self, exo_video, generator, device, height, width, 
-                            num_frames, batch_size=1, num_videos_per_prompt=1):
+                            num_frames, batch_size=1, num_videos_per_prompt=1,
+                            ego_latents: Optional[torch.Tensor] = None):
         """Setup shared latent for IC-LoRA (exo + random ego)"""
         if exo_video is None:
             return
@@ -240,10 +248,17 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         exo_latents = self.encode_video(exo_video)  # [B, C, F, H, exo_latent_width]
         exo_latents = exo_latents.repeat(batch_size, 1, 1, 1, 1)
         
-        # Generate random ego latent
-        ego_shape = (batch_size, num_channels_latents, num_latent_frames, latent_height, ego_latent_width)
-        # Generate on CPU with generator, then move to device
-        ego_latents = torch.randn(ego_shape, generator=generator, dtype=exo_latents.dtype).to(device)
+        if ego_latents is None:
+            # Generate random ego latent
+            ego_shape = (batch_size, num_channels_latents, num_latent_frames, latent_height, ego_latent_width)
+            # Generate on CPU with generator, then move to device
+            ego_latents = torch.randn(ego_shape, generator=generator, dtype=exo_latents.dtype).to(device)
+        else:
+            # Ensure ego_latents is on the correct device and has correct dtype
+            ego_latents = ego_latents.to(device=device, dtype=exo_latents.dtype)
+            # Validate shape matches target
+            ego_shape = (batch_size, num_channels_latents, num_latent_frames, latent_height, ego_latent_width)
+            assert ego_latents.shape == ego_shape, f"ego_latents shape {ego_latents.shape} does not match expected shape {ego_shape}"
         
         # Concatenate exo + ego latents
         self._shared_latent_exo_randn = torch.cat([exo_latents, ego_latents], dim=-1)
@@ -289,8 +304,9 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         # Convert to float32 for CLIP compatibility (BFloat16 not supported by transformers image processor)
         decoded_image = decoded_image.to(dtype=torch.float32)
         
-        # Convert from [-1, 1] to [0, 1] range for CLIP processor
+        # Convert from [-1, 1] to [0, 1] range for CLIP processor and clamp values to [0, 1]
         decoded_image = (decoded_image + 1.0) / 2.0
+        decoded_image = torch.clamp(decoded_image, 0.0, 1.0)
         
         # Use decoded image for CLIP encoding - processor handles all normalization
         image = self.image_processor(images=decoded_image, return_tensors="pt", do_rescale=False).to(device)
@@ -387,6 +403,8 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
         do_kv_cache: bool = True,
         do_custom_test: bool = False,
         save_attn_dir_name: Optional[str] = None,
+        mask_first_frame_ego: bool = False,
+        ego_latents: Optional[torch.Tensor] = None,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -486,7 +504,8 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
             width=width, # didn't used
             num_frames=num_frames,
             batch_size=1,
-            num_videos_per_prompt=num_videos_per_prompt
+            num_videos_per_prompt=num_videos_per_prompt,
+            ego_latents=ego_latents,
         )
 
         # 1. Check inputs. Raise error if not correct
@@ -585,6 +604,7 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
             generator,
             latents,
             last_image,
+            mask_first_frame_ego=mask_first_frame_ego,
         )
 
         # 6. Denoising loop
@@ -641,6 +661,10 @@ class WanWidthConcatImageToVideoPipeline(WanImageToVideoPipeline):
                 # Set exo region (left part) of noise_pred to 0 to prevent exo latents from being updated
                 # ego_latent_width = ego_width // self.vae_scale_factor_spatial  # ego_width = height = 448
                 noise_pred[:, :, :, :, :-ego_latent_width] = 0.0
+
+                if mask_first_frame_ego:
+                    # Set the noise prediction of the first frame of the ego region to 0.0
+                    noise_pred[:, :, 0, :, -ego_latent_width:] = 0.0
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]

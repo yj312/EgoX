@@ -33,13 +33,23 @@ def generate_video(
     cos_sim_scaling_factor: float = 1.0,
     do_kv_cache: bool = False,
     pipe = None,
+    mask_first_frame_ego: bool = False,
+    ego_latents: Optional[torch.Tensor] = None,
+    save_ego_only: bool = True,
 ):
     """
     Generates a video based on the given prompt and saves it to the specified path.
     """
 
-    exo_video = load_video(video=exo_video_path)
-    ego_prior_video = load_video(video=ego_prior_video_path)
+    if isinstance(exo_video_path, str):
+        exo_video = load_video(video=exo_video_path)
+    else:
+        exo_video = exo_video_path
+
+    if isinstance(ego_prior_video_path, str):
+        ego_prior_video = load_video(video=ego_prior_video_path)
+    else:
+        ego_prior_video = ego_prior_video_path
 
     cropped_exo_video = []
     for img in exo_video:
@@ -89,11 +99,19 @@ def generate_video(
         cam_rays = cam_rays,
         cos_sim_scaling_factor=cos_sim_scaling_factor,
         do_kv_cache = do_kv_cache,
+        mask_first_frame_ego = mask_first_frame_ego,
+        ego_latents = ego_latents,
         ).frames[0]
     
     import imageio
-    video_frames = np.clip(video_generate * 255, 0, 255).astype(np.uint8)
-    imageio.mimsave(output_path, video_frames, fps=fps)
+    
+    # Save the output video
+    video_to_save = video_generate
+
+    video_frames = np.clip(video_to_save * 255, 0, 255).astype(np.uint8)
+    # os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    imageio.mimsave(output_path, video_frames, fps=fps, quality=9)
     print(f"Video saved to: {output_path}")
 
     return video_generate
+# /home/i2slab4/yj/EgoX/core/inference/wan copy.py
