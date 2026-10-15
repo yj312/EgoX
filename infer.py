@@ -21,106 +21,6 @@ def _set_seed(seed: Optional[int]) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-import re
-
-def get_chunk_prompt(prompt, chunk_idx, num_chunks):
-    if not isinstance(prompt, str):
-        return prompt
-        
-    # Helper to split text into sentences
-    def split_into_sentences(text):
-        # Split by period, question mark, or exclamation mark followed by space or newline
-        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-        return [s for s in sentences if s.strip()]
-        
-    # Parse Exo and Ego sections
-    exo_part = ""
-    ego_part = ""
-    
-    if "[Ego view]" in prompt:
-        parts = prompt.split("[Ego view]")
-        exo_part = parts[0].replace("[Exo view]", "").strip()
-        ego_part = parts[1].strip()
-    else:
-        exo_part = prompt.replace("[Exo view]", "").strip()
-        
-    def parse_section(part_text):
-        scene = ""
-        action = ""
-        # Accept both the README's Markdown labels and plain caption labels.
-        # Caption files should not need model-specific formatting rewrites.
-        action_match = re.search(r"(?:\*\*)?Action Analysis:(?:\*\*)?", part_text)
-        scene_pattern = r"(?:\*\*)?Scene Overview:(?:\*\*)?"
-        if action_match:
-            scene_text = part_text[:action_match.start()]
-            scene = re.sub(scene_pattern, "", scene_text, count=1).strip()
-            action = part_text[action_match.end():].strip()
-        elif re.search(scene_pattern, part_text):
-            scene = re.sub(scene_pattern, "", part_text, count=1).strip()
-        else:
-            action = part_text
-        return scene, action
-
-    exo_scene, exo_action = parse_section(exo_part)
-    ego_scene, ego_action = parse_section(ego_part)
-    
-    # If no action descriptions found, fallback to original prompt
-    if not exo_action and not ego_action:
-        return prompt
-        
-    # Split actions into sentences
-    exo_sentences = split_into_sentences(exo_action) if exo_action else []
-    ego_sentences = split_into_sentences(ego_action) if ego_action else []
-    
-    # Helper to get sliding window subset of sentences for current chunk
-    def get_chunk_sentences(sentences, idx, total):
-        S = len(sentences)
-        if S == 0:
-            return ""
-        if total <= 1:
-            return " ".join(sentences)
-            
-        # Calculate center sentence index for current chunk
-        c_i = idx * (S - 1) / (total - 1)
-        # Determine window size (at least 2 sentences, or proportional to chunk density)
-        w_s = max(2, int(round(S / total)) + 1)
-        
-        start = max(0, int(round(c_i - w_s / 2.0)))
-        end = min(S, int(round(c_i + w_s / 2.0)))
-        # Adjust window to make sure we get at least some sentences
-        if end - start < w_s:
-            if start == 0:
-                end = min(S, w_s)
-            elif end == S:
-                start = max(0, S - w_s)
-                
-        chunk_sens = sentences[start:end]
-        return " ".join(chunk_sens)
-
-    chunk_exo_action = get_chunk_sentences(exo_sentences, chunk_idx, num_chunks)
-    chunk_ego_action = get_chunk_sentences(ego_sentences, chunk_idx, num_chunks)
-    
-    # Reconstruct the prompt
-    reconstructed = ""
-    if exo_scene or chunk_exo_action:
-        reconstructed += "[Exo view]\n"
-        if exo_scene:
-            reconstructed += f"**Scene Overview:**\n{exo_scene}\n\n"
-        if chunk_exo_action:
-            reconstructed += f"**Action Analysis:**\n{chunk_exo_action}\n"
-            
-    if ego_scene or chunk_ego_action:
-        if reconstructed:
-            reconstructed += "\n"
-        reconstructed += "[Ego view]\n"
-        if ego_scene:
-            reconstructed += f"**Scene Overview:**\n{ego_scene}\n\n"
-        if chunk_ego_action:
-            reconstructed += f"**Action Analysis:**\n{chunk_ego_action}\n"
-            
-    return reconstructed.strip()
-
-
 def main(args):
     _set_seed(args.seed)
 
@@ -139,15 +39,12 @@ def main(args):
     take_names = []
 
     for i, meta in enumerate(meta_data):
-        exo_path = meta['exo_path']
-        exo_videos.append(exo_path)
+        exo_videos.append(meta['exo_path'])
         ego_prior_videos.append(meta['ego_prior_path'])
         prompts.append(meta['prompt'])
-        
-        take_name = Path(exo_path).parent.name
-        depth_root = Path(exo_path).parents[2]
-        depth_map_paths.append(depth_root / 'depth_maps' / take_name)
-        
+        take_name = exo_videos[-1].split('/')[-2]
+        depth_root = "/".join(meta['exo_path'].split('/')[:3])
+        depth_map_paths.append(Path(os.path.join(depth_root, 'depth_maps', take_name)))
         camera_extrinsics.append(meta['camera_extrinsics'])
         camera_intrinsics.append(meta['camera_intrinsics'])
         ego_extrinsics.append(meta['ego_extrinsics'])
@@ -191,326 +88,180 @@ def main(args):
         take_name=take_names[i]
         exo_video_path = str(exo_video_path)
         ego_prior_video_path = str(ego_prior_video_path)
-        
-        # Robust path resolution relative to current script directory
-        p_exo = Path(exo_video_path)
-        if not p_exo.exists() and "datasets/" in exo_video_path:
-            part = exo_video_path[exo_video_path.find("datasets/"):]
-            p_exo = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), part))
-        exo_video_path = str(p_exo)
-        
-        p_ego = Path(ego_prior_video_path)
-        if not p_ego.exists() and "datasets/" in ego_prior_video_path:
-            part = ego_prior_video_path[ego_prior_video_path.find("datasets/"):]
-            p_ego = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), part))
-        ego_prior_video_path = str(p_ego)
-
-        print(f"Resolved Exo Video Path: {exo_video_path}")
-        print(f"Resolved Ego Prior Video Path: {ego_prior_video_path}")
-
-        from diffusers.utils import load_video
-        full_exo_video = load_video(video=exo_video_path)
-        full_ego_prior_video = load_video(video=ego_prior_video_path)
-        total_frames = min(len(full_exo_video), len(full_ego_prior_video), len(ego_extrinsics[i]))
-        
-        chunk_size = 49
-        overlap = 8
-        stride = chunk_size - overlap
-        
-        if total_frames <= chunk_size:
-            num_chunks = 1
-        else:
-            num_chunks = (total_frames - overlap - 1) // stride + 1
-            
-        print(f"Total frames: {total_frames}, chunks to generate: {num_chunks}")
+        print(exo_video_path)
+        print(ego_prior_video_path)
 
         if args.use_GGA:
             depth_map_path = depth_map_paths[i]
-            
-            # Robust depth map path resolution
-            if not depth_map_path.exists():
-                depth_map_str = str(depth_map_path)
-                if "datasets/" in depth_map_str:
-                    part = depth_map_str[depth_map_str.find("datasets/"):]
-                    depth_map_path = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), part))
-            print(f"Resolved Depth Map Path: {depth_map_path}")
+            camera_intrinsic = camera_intrinsics[i]
+            camera_extrinsic = camera_extrinsics[i]
+            ego_extrinsic = ego_extrinsics[i]
+            ego_intrinsic = ego_intrinsics[i]
 
-            camera_intrinsic_full = camera_intrinsics[i]
-            camera_extrinsic_full = camera_extrinsics[i]
-            ego_extrinsic_full = ego_extrinsics[i]
-            ego_intrinsic_full = ego_intrinsics[i]
+            device = 'cpu'
 
-            # Load all depth maps for the video
-            depth_maps_all = []
+            C, F, H, W = 16, 13, 56, 154 #! Hard coding
+            exo_H, exo_W = H, W - H
+            W = H
+
+            depth_maps = []
             for depth_map_file in sorted(depth_map_path.glob("*.npy")):
                 depth_map = np.load(depth_map_file)
-                depth_maps_all.append(torch.from_numpy(depth_map).unsqueeze(0))
-            depth_maps_all = torch.cat(depth_maps_all, dim=0) # [Total_F, H, W]
+                depth_maps.append(torch.from_numpy(depth_map).unsqueeze(0))
+            depth_maps = torch.cat(depth_maps, dim=0) # [F, H, W]
 
-            ego_intrinsic_full = torch.tensor(ego_intrinsic_full)
-            ego_extrinsic_full = torch.tensor(ego_extrinsic_full)
-            camera_extrinsic_full = torch.tensor(camera_extrinsic_full)
-            camera_intrinsic_full = torch.tensor(camera_intrinsic_full)
+            ego_intrinsic=torch.tensor(ego_intrinsic)           #! (3,3)
+            ego_extrinsic=torch.tensor(ego_extrinsic)           #! (F, 3, 4)
+            camera_extrinsic=torch.tensor(camera_extrinsic)     #! (3,4)
+            camera_intrinsic=torch.tensor(camera_intrinsic)     #! (3,3)
 
-            if ego_extrinsic_full.shape[1] == 3 and ego_extrinsic_full.shape[2] == 4:
-                ego_extrinsic_full = torch.cat([ego_extrinsic_full, torch.tensor([[[0, 0, 0, 1]]], dtype=ego_extrinsic_full.dtype).expand(ego_extrinsic_full.shape[0], -1, -1)], dim=1)
-            if camera_extrinsic_full.shape == (3, 4):
-                camera_extrinsic_full = torch.cat([torch.tensor(camera_extrinsic_full, dtype=ego_extrinsic_full.dtype), torch.tensor([[0, 0, 0, 1]], dtype=ego_extrinsic_full.dtype)], dim=0)
+            if ego_extrinsic.shape[1] == 3 and ego_extrinsic.shape[2] == 4:
+                ego_extrinsic = torch.cat([ego_extrinsic, torch.tensor([[[0, 0, 0, 1]]], dtype=ego_extrinsic.dtype).expand(ego_extrinsic.shape[0], -1, -1)], dim=1)
+            if camera_extrinsic.shape == (3, 4):
+                camera_extrinsic = torch.cat([torch.tensor(camera_extrinsic, dtype=ego_extrinsic.dtype), torch.tensor([[0, 0, 0, 1]], dtype=ego_extrinsic.dtype)], dim=0)
 
-        # Generate global ego noise for the entire video to ensure temporal noise consistency across chunks
-        num_channels_latents = 16
-        latent_height = 448 // 8  # 56
-        ego_latent_width = 448 // 8  # 56
-        num_latent_frames_total = (total_frames - 1) // 4 + 1
-        
-        # We use a CPU generator for reproducibility across different GPU states
-        generator_noise = torch.Generator(device="cpu").manual_seed(args.seed)
-        global_ego_noise = torch.randn(
-            (1, num_channels_latents, num_latent_frames_total, latent_height, ego_latent_width),
-            generator=generator_noise,
-            dtype=torch.float32
-        )
+            scale = 1/8
+            scaled_intrinsic = ego_intrinsic.clone()
+            scaled_intrinsic[0, 0] *= scale  # fx' = fx * s
+            scaled_intrinsic[1, 1] *= scale  # fy' = fy * s
+            scaled_intrinsic[0, 2] *= scale  # cx' = cx * s
+            scaled_intrinsic[1, 2] *= scale
 
-        generated_ego_chunks = []
-        chunk_start_indices = []
+            ys, xs = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device))
+            ones = torch.ones_like(xs)
+            pixel_coords = torch.stack([xs, ys, ones], dim=-1).view(-1, 3).to(dtype=ego_intrinsic.dtype)  # (H*W, 3)
 
-        for chunk_idx in range(num_chunks):
-            start_idx = chunk_idx * stride
-            end_idx = start_idx + chunk_size
-            if end_idx > total_frames:
-                end_idx = total_frames
-                start_idx = max(0, end_idx - chunk_size)
+            pixel_coords_cv = pixel_coords[..., :2].cpu().numpy().reshape(-1, 1, 2).astype(np.float32)
+            K = scaled_intrinsic.cpu().numpy().astype(np.float32)
+
+            import cv2
+            #! Ego cam distorion coeffs (Project Aria) - Hard coded
+            distortion_coeffs = np.array([[-0.02340373583137989,0.09388021379709244,-0.06088035926222801,0.0053304750472307205,0.003342868760228157,-0.0006356257363222539,0.0005087381578050554,-0.0004747129278257489,-0.0011330085108056664,-0.00025734835071489215,0.00009328465239377692,0.00009424977179151028]])
+            D = distortion_coeffs.astype(np.float32) # ex: [k1, k2, k3, k4, k5, k6, p1, p2, s1, s2, s3, s4]
+            normalized_points = cv2.undistortPoints(pixel_coords_cv, K, D, R=np.eye(3), P=np.eye(3))
+
+
+            normalized_points = torch.from_numpy(normalized_points).squeeze(1).to(device) # (N, 2)
+
+            ones = torch.ones_like(normalized_points[..., :1])
+            cam_rays_fish = torch.cat([normalized_points, ones], dim=-1) # (N, 3)
+
+            cam_rays = cam_rays_fish / torch.norm(cam_rays_fish, dim=-1, keepdim=True)
+
+            cam_rays = cam_rays @ ego_extrinsic[::4, :3, :3]
+
+            cam_rays = cam_rays.view(F, H, W, 3)  # (B, H, W, 3)
+
+            height, width = depth_maps.shape[1], depth_maps.shape[2]
+            cx = width / 2.0
+            cy = height / 2.0
+            camera_intrinsic_scale_y = cy / camera_intrinsic[1,2]
+            camera_intrinsic_scale_x = cx / camera_intrinsic[0,2]
+            camera_intrinsic[0, 0] = camera_intrinsic[0, 0] * camera_intrinsic_scale_x
+            camera_intrinsic[1, 1] = camera_intrinsic[1, 1] * camera_intrinsic_scale_y
+            camera_intrinsic[0, 2] = cx
+            camera_intrinsic[1, 2] = cy
+
+            camera_intrinsic = np.array([camera_intrinsic[0, 0] , camera_intrinsic[1, 1], cx, cy])
             
-            chunk_start_indices.append(start_idx)
+            disp_v, disp_u = torch.meshgrid(
+                torch.arange(depth_maps.shape[1], device=device).float(),
+                torch.arange(depth_maps.shape[2],device=device).float(),
+                indexing="ij",
+            )
+
+            disp = torch.ones_like(disp_v)
+
+            disp_cpu = disp.cpu()
+            disp_u_cpu = disp_u.cpu()
+            disp_v_cpu = disp_v.cpu()
             
-            # Slice global ego noise for the current chunk
-            start_idx_latent = start_idx // 4
-            num_latent_frames_chunk = (chunk_size - 1) // 4 + 1
-            chunk_ego_noise = global_ego_noise[:, :, start_idx_latent : start_idx_latent + num_latent_frames_chunk].clone().cuda()
-                
-            print(f"Generating chunk {chunk_idx + 1}/{num_chunks} (frames {start_idx} to {end_idx})")
-            
-            exo_chunk = full_exo_video[start_idx:end_idx]
-            ego_prior_chunk = list(full_ego_prior_video[start_idx:end_idx])
-            
-            if chunk_idx > 0:
-                prev_start_idx = chunk_start_indices[chunk_idx - 1]
-                overlap_index = start_idx - prev_start_idx
-                prev_ego_frame = generated_ego_chunks[chunk_idx - 1][overlap_index]
-                from PIL import Image
-                prev_frame_np = np.clip(prev_ego_frame * 255, 0, 255).astype(np.uint8)
-                ego_prior_chunk[0] = Image.fromarray(prev_frame_np)
-                
-            if args.use_GGA:
-                depth_maps = depth_maps_all[start_idx:end_idx]
-                ego_extrinsic = ego_extrinsic_full[start_idx:end_idx]
-                camera_extrinsic = camera_extrinsic_full.clone()
-                camera_intrinsic = camera_intrinsic_full.clone()
-                ego_intrinsic = ego_intrinsic_full.clone()
-                
-                device = 'cpu'
+            pts, _, _ = iproj_disp(torch.from_numpy(camera_intrinsic), disp_cpu, disp_u_cpu, disp_v_cpu)
 
-                C, F_hardcoded, H, W = 16, 13, 56, 154 #! Hard coding
-                exo_H, exo_W = H, W - H
-                W = H
-
-                num_frames = (F_hardcoded - 1) * 4 + 1
-                ego_extrinsic = ego_extrinsic[:num_frames]
-                actual_F = ego_extrinsic[::4].shape[0]
-
-                scale = 1/8
-                scaled_intrinsic = ego_intrinsic.clone()
-                scaled_intrinsic[0, 0] *= scale  # fx' = fx * s
-                scaled_intrinsic[1, 1] *= scale  # fy' = fy * s
-                scaled_intrinsic[0, 2] *= scale  # cx' = cx * s
-                scaled_intrinsic[1, 2] *= scale
-
-                ys, xs = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device))
-                ones = torch.ones_like(xs)
-                pixel_coords = torch.stack([xs, ys, ones], dim=-1).view(-1, 3).to(dtype=ego_intrinsic.dtype)  # (H*W, 3)
-
-                pixel_coords_cv = pixel_coords[..., :2].cpu().numpy().reshape(-1, 1, 2).astype(np.float32)
-                K = scaled_intrinsic.cpu().numpy().astype(np.float32)
-
-                import cv2
-                distortion_coeffs = np.array([[-0.02340373583137989,0.09388021379709244,-0.06088035926222801,0.0053304750472307205,0.003342868760228157,-0.0006356257363222539,0.0005087381578050554,-0.0004747129278257489,-0.0011330085108056664,-0.00025734835071489215,0.00009328465239377692,0.00009424977179151028]])
-                D = distortion_coeffs.astype(np.float32) # ex: [k1, k2, k3, k4, k5, k6, p1, p2, s1, s2, s3, s4]
-                normalized_points = cv2.undistortPoints(pixel_coords_cv, K, D, R=np.eye(3), P=np.eye(3))
-
-                normalized_points = torch.from_numpy(normalized_points).squeeze(1).to(device) # (N, 2)
-
-                ones = torch.ones_like(normalized_points[..., :1])
-                cam_rays_fish = torch.cat([normalized_points, ones], dim=-1) # (N, 3)
-
-                cam_rays = cam_rays_fish / torch.norm(cam_rays_fish, dim=-1, keepdim=True)
-
-                cam_rays = cam_rays @ ego_extrinsic[::4, :3, :3]
-
-                cam_rays = cam_rays.view(actual_F, H, W, 3)  # (B, H, W, 3)
-
-                height, width = depth_maps.shape[1], depth_maps.shape[2]
-                cx = width / 2.0
-                cy = height / 2.0
-                camera_intrinsic_scale_y = cy / camera_intrinsic[1,2]
-                camera_intrinsic_scale_x = cx / camera_intrinsic[0,2]
-                camera_intrinsic[0, 0] = camera_intrinsic[0, 0] * camera_intrinsic_scale_x
-                camera_intrinsic[1, 1] = camera_intrinsic[1, 1] * camera_intrinsic_scale_y
-                camera_intrinsic[0, 2] = cx
-                camera_intrinsic[1, 2] = cy
-
-                camera_intrinsic = np.array([camera_intrinsic[0, 0] , camera_intrinsic[1, 1], cx, cy])
-                
-                disp_v, disp_u = torch.meshgrid(
-                    torch.arange(depth_maps.shape[1], device=device).float(),
-                    torch.arange(depth_maps.shape[2],device=device).float(),
-                    indexing="ij",
-                )
-
-                disp = torch.ones_like(disp_v)
-
-                disp_cpu = disp.cpu()
-                disp_u_cpu = disp_u.cpu()
-                disp_v_cpu = disp_v.cpu()
-                
-                pts, _, _ = iproj_disp(torch.from_numpy(camera_intrinsic), disp_cpu, disp_u_cpu, disp_v_cpu)
-
-                if isinstance(pts, torch.Tensor):
-                    pts = pts.to(device)
-                else:
-                    pts = torch.from_numpy(pts).to(device).float()
-                
-                rays = pts[..., :3] 
-
-                rays = rays / rays[..., 2:3]    
-                rays = rays.unsqueeze(0).expand(depth_maps.size(0), -1, -1, -1)  # (F, H, W, 3)
-                camera_extrinsics_c2w = torch.linalg.inv(camera_extrinsic)
-
-                pcd_camera = rays * depth_maps.unsqueeze(-1)
-                point_map = pcd_camera.to(dtype=camera_extrinsics_c2w.dtype)
-                point_map = torch.tensor(point_map) #! [F, H, W, 3]
-
-                p_f, p_h, p_w, p_p = point_map.shape
-                point_map_world = point_map.reshape(-1, 3)
-
-                camera_extrinsics_c2w = torch.linalg.inv(camera_extrinsic)
-                ones_point = torch.ones(point_map_world.shape[0], 1, device=point_map_world.device)
-                point_map_world = torch.cat([point_map_world, ones_point], dim=-1) #! [F, H*W, 4]
-                point_map_world = (camera_extrinsics_c2w @ point_map_world.T).T[...,:3]
-                point_map = point_map_world.reshape(p_f, p_h, p_w, 3).permute(0, 3, 1, 2)
-
-                point_map = point_map[:, :, (point_map.shape[2] - 448)//2:(point_map.shape[2] + 448)//2, (point_map.shape[3] - 784)//2:(point_map.shape[3] + 784)//2] #! [F, 3, 448, 784]
-                point_map = torch.nn.functional.interpolate(point_map, size=(exo_H, exo_W), mode='bilinear', align_corners=False).permute(0, 2, 3, 1) #! [B, H, W, 3]
-
-                ego_extrinsic_c2w = torch.linalg.inv(ego_extrinsic)
-
-                cam_origins = ego_extrinsic_c2w[::4, :3, 3].unsqueeze(1).expand(-1, exo_H * exo_W, -1)  # (B, H*W, 3)
-                cam_origins = cam_origins.view(actual_F, exo_H, exo_W, 3)  # (B, H, W, 3)
-
-                if point_map.size(0) != ego_extrinsic_c2w.size(0):
-                    min_size = min(point_map.size(0), ego_extrinsic_c2w.size(0))
-                    point_map = point_map[:min_size]
-                
-
-                point_vecs_per_frame = []
-                for j in range(cam_origins.size(0)):
-                    point_vec = point_map[::4] - cam_origins[j].unsqueeze(0)  #! [B, H, W, 3]
-                    point_vec = point_vec / torch.norm(point_vec, dim=-1, keepdim=True)  #! [B,H, W, 3]
-                    point_vecs_per_frame.append(point_vec)
-                point_vecs_per_frame = torch.stack(point_vecs_per_frame, dim=0)  #! [B, B, H, W, 3]
-
-                point_vecs = point_map[::4] - cam_origins #! [B, H, W, 3]
-                point_vecs = point_vecs / torch.norm(point_vecs, dim=-1, keepdim=True) #! [B, H, W, 3]
-
-                cam_rays = torch.rot90(cam_rays, k=-1, dims=[1, 2])
-
-                attn_maps = torch.cat((point_vecs, cam_rays), dim = 2)
-                attn_masks = torch.cat((torch.ones_like(point_vecs), torch.zeros_like(cam_rays)), dim = 2)
+            if isinstance(pts, torch.Tensor):
+                pts = pts.to(device)
             else:
-                point_vecs_per_frame = None
-                attn_maps = None
-                attn_masks = None
-                cam_rays = None
-
-            temp_output_filename = f'{take_name}_{i}_chunk_{chunk_idx}.mp4'  
-            temp_output_path = os.path.join(args.out, temp_output_filename)
+                pts = torch.from_numpy(pts).to(device).float()
             
-            if args.idx==-1 or i==args.idx:
-                print('\n', i)
-                if isinstance(prompt, list):
-                    chunk_prompt = prompt[min(chunk_idx, len(prompt) - 1)]
-                    print(f"Using manual chunk-specific prompt for chunk {chunk_idx}: {chunk_prompt[:100]}...")
-                else:
-                    chunk_prompt = get_chunk_prompt(prompt, chunk_idx, num_chunks)
-                    print(f"Automatically split prompt for chunk {chunk_idx}:\n{chunk_prompt}\n" + "="*40)
-                video = generate_video(
-                    prompt=chunk_prompt,
-                    exo_video_path=exo_chunk,
-                    ego_prior_video_path=ego_prior_chunk,
-                    output_path=temp_output_path,
-                    num_frames=chunk_size,
-                    width=784+448,
-                    height=448,
-                    num_inference_steps=50,
-                    guidance_scale=5.0,
-                    fps=30,
-                    num_videos_per_prompt=1,
-                    seed=args.seed,
-                    attention_GGA=attn_maps.unsqueeze(0) if attn_maps is not None else None,
-                    attention_mask_GGA=attn_masks.unsqueeze(0) if attn_masks is not None else None,
-                    point_vecs_per_frame = point_vecs_per_frame,
-                    cam_rays = cam_rays,
-                    do_kv_cache = args.do_kv_cache,
-                    cos_sim_scaling_factor=args.cos_sim_scaling_factor,
-                    pipe = pipe,
-                    mask_first_frame_ego = (chunk_idx > 0),
-                    ego_latents = chunk_ego_noise,
-                )
-                
-                # Use full video chunk (exo+ego view)
-                # video shape: [49, H, W_total, C]
-                generated_ego_chunks.append(video)
+            rays = pts[..., :3] 
 
-        # 4. Perform alpha blending and concatenation of full view chunks
-        if num_chunks == 1:
-            final_ego_video = generated_ego_chunks[0]
+            rays = rays / rays[..., 2:3]    
+            rays = rays.unsqueeze(0).expand(depth_maps.size(0), -1, -1, -1)  # (F, H, W, 3)
+            camera_extrinsics_c2w = torch.linalg.inv(camera_extrinsic)
+
+            pcd_camera = rays * depth_maps.unsqueeze(-1)
+            point_map = pcd_camera.to(dtype=camera_extrinsics_c2w.dtype)
+            point_map = torch.tensor(point_map) #! [F, H, W, 3]
+
+            p_f, p_h, p_w, p_p = point_map.shape
+            point_map_world = point_map.reshape(-1, 3)
+
+            camera_extrinsics_c2w = torch.linalg.inv(camera_extrinsic)
+            ones_point = torch.ones(point_map_world.shape[0], 1, device=point_map_world.device)
+            point_map_world = torch.cat([point_map_world, ones_point], dim=-1) #! [F, H*W, 4]
+            point_map_world = (camera_extrinsics_c2w @ point_map_world.T).T[...,:3]
+            point_map = point_map_world.reshape(p_f, p_h, p_w, 3).permute(0, 3, 1, 2)
+
+            point_map = point_map[:, :, (point_map.shape[2] - 448)//2:(point_map.shape[2] + 448)//2, (point_map.shape[3] - 784)//2:(point_map.shape[3] + 784)//2] #! [F, 3, 448, 784]
+            point_map = torch.nn.functional.interpolate(point_map, size=(exo_H, exo_W), mode='bilinear', align_corners=False).permute(0, 2, 3, 1) #! [B, H, W, 3]
+
+            ego_extrinsic_c2w = torch.linalg.inv(ego_extrinsic)
+
+            cam_origins = ego_extrinsic_c2w[::4, :3, 3].unsqueeze(1).expand(-1, exo_H * exo_W, -1)  # (B, H*W, 3)
+            cam_origins = cam_origins.view(F, exo_H, exo_W, 3)  # (B, H, W, 3)
+
+            if point_map.size(0) != ego_extrinsic_c2w.size(0):
+                min_size = min(point_map.size(0), ego_extrinsic_c2w.size(0))
+                point_map = point_map[:min_size]
+            
+
+            point_vecs_per_frame = []
+            for j in range(cam_origins.size(0)):
+                point_vec = point_map[::4] - cam_origins[j].unsqueeze(0)  #! [B, H, W, 3]
+                point_vec = point_vec / torch.norm(point_vec, dim=-1, keepdim=True)  #! [B,H, W, 3]
+                point_vecs_per_frame.append(point_vec)
+            point_vecs_per_frame = torch.stack(point_vecs_per_frame, dim=0)  #! [B, B, H, W, 3]
+
+            point_vecs = point_map[::4] - cam_origins #! [B, H, W, 3]
+            point_vecs = point_vecs / torch.norm(point_vecs, dim=-1, keepdim=True) #! [B, H, W, 3]
+
+            cam_rays = torch.rot90(cam_rays, k=-1, dims=[1, 2])
+
+            attn_maps = torch.cat((point_vecs, cam_rays), dim = 2)
+            attn_masks = torch.cat((torch.ones_like(point_vecs), torch.zeros_like(cam_rays)), dim = 2)
         else:
-            final_ego_video = generated_ego_chunks[0][:-overlap].copy()
-            for k in range(1, num_chunks):
-                prev_chunk = generated_ego_chunks[k-1]
-                curr_chunk = generated_ego_chunks[k]
-                
-                c1_overlap = prev_chunk[-overlap:]
-                c2_overlap = curr_chunk[:overlap]
-                
-                weights = np.linspace(0.0, 1.0, overlap)
-                weights = weights[:, np.newaxis, np.newaxis, np.newaxis] # Shape [overlap, 1, 1, 1]
-                
-                blended_overlap = (1.0 - weights) * c1_overlap + weights * c2_overlap
-                final_ego_video = np.concatenate([final_ego_video, blended_overlap], axis=0)
-                
-                if k == num_chunks - 1:
-                    final_ego_video = np.concatenate([final_ego_video, curr_chunk[overlap:]], axis=0)
-                else:
-                    final_ego_video = np.concatenate([final_ego_video, curr_chunk[overlap:-overlap]], axis=0)
+            point_vecs_per_frame = None
+            attn_maps = None
+            attn_masks = None
+            cam_rays = None
 
-        # 5. Save the final blended long video to disk
-        import imageio
-        output_filename = f'{take_name}_{i}_long.mp4'  
+        output_filename = f'{take_name}.mp4'  
         output_path = os.path.join(args.out, output_filename)
-        video_frames = np.clip(final_ego_video * 255, 0, 255).astype(np.uint8)
-        imageio.mimsave(output_path, video_frames, fps=30, quality=9)
-        print(f"★ Saved long video to: {output_path}")
-
-        # 6. Clean up temporary chunk files
-        for chunk_idx in range(num_chunks):
-            temp_filename = f'{take_name}_{i}_chunk_{chunk_idx}.mp4'
-            temp_path = os.path.join(args.out, temp_filename)
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                    print(f"Removed temporary chunk file: {temp_path}")
-                except Exception as e:
-                    print(f"Failed to remove temporary chunk file {temp_path}: {e}")
+        
+        if args.idx==-1 or i==args.idx:
+            print('\n', i)
+            video = generate_video(
+                prompt=prompt,
+                exo_video_path=exo_video_path,
+                ego_prior_video_path=ego_prior_video_path,
+                output_path=output_path,
+                num_frames=49,
+                width=784+448,
+                height=448,
+                num_inference_steps=50,
+                # num_inference_steps=30,
+                guidance_scale=5.0,
+                fps=30,
+                num_videos_per_prompt=1,
+                seed=args.seed,
+                attention_GGA=attn_maps.unsqueeze(0) if attn_maps is not None else None,
+                attention_mask_GGA=attn_masks.unsqueeze(0) if attn_masks is not None else None,
+                point_vecs_per_frame = point_vecs_per_frame,
+                cam_rays = cam_rays,
+                do_kv_cache = args.do_kv_cache,
+                cos_sim_scaling_factor=args.cos_sim_scaling_factor,
+                pipe = pipe,
+            )
 
 
 if __name__ == "__main__":
