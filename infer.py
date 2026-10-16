@@ -42,9 +42,14 @@ def main(args):
         exo_videos.append(meta['exo_path'])
         ego_prior_videos.append(meta['ego_prior_path'])
         prompts.append(meta['prompt'])
-        take_name = exo_videos[-1].split('/')[-2]
-        depth_root = "/".join(meta['exo_path'].split('/')[:3])
-        depth_map_paths.append(Path(os.path.join(depth_root, 'depth_maps', take_name)))
+        exo_path = Path(meta['exo_path'])
+        take_name = exo_path.parent.name
+
+        # exo.mp4 is stored as:
+        # .../datasets/egobodyN/videos/egobodyN/exo.mp4
+        # Therefore parents[2] points to .../datasets/egobodyN.
+        depth_root = exo_path.parents[2]
+        depth_map_paths.append(depth_root / 'depth_maps' / 'exo')
         camera_extrinsics.append(meta['camera_extrinsics'])
         camera_intrinsics.append(meta['camera_intrinsics'])
         ego_extrinsics.append(meta['ego_extrinsics'])
